@@ -1,0 +1,73 @@
+machine:
+  environment:
+    # - HOGE: fuga
+  services:
+    - docker
+
+  timezone:
+    Asia/Tokyo
+
+  ruby:
+    version:
+      2.2.0
+
+  hosts:
+    circlehost: 127.0.0.1
+
+dependencies:
+  cache_directories:
+    - "~/docker"
+
+  pre:
+    - rbenv exec gem install bundler -v 1.10.5 # use a custom version of bundler
+    - rbenv rehash
+
+  override:
+    - docker info
+    - if [[ -e ~/docker/image.tar ]]; then docker load --input ~/docker/image.tar; fi
+    - docker build -t violetyk/rails-sample .
+    - mkdir -p ~/docker; docker save violetyk/rails-sample > ~/docker/image.tar
+
+database:
+  override:
+    - mysql -e "grant all privileges on *.* to 'docker'@'%' identified by 'docker'"
+    - mysql -e "flush privileges"
+
+test:
+  override:
+    - export CIRCLE_CI_HOST=$(ip r | grep 'docker0' | awk '{print $9}')
+    ## rspec
+    - docker run --env DATABASE_URL=mysql2://docker:docker@localhost/circle_test?socket=/var/volume/mysqld.sock -v /var/run/mysqld:/var/volume:rw --env RAILS_ENV=test violetyk/rails-sample bundle exec rspec
+    ## docker container
+    - docker run --env DATABASE_URL=mysql2://ubuntu:@localhost/circle_test?socket=/var/volume/mysqld.sock -v /var/run/mysqld:/var/volume:rw --env RAILS_ENV=production -p 3000:3000 violetyk/rails-sample bundle exec unicorn -c config/unicorn.rb; sleep 10
+    - curl --retry 10 --retry-delay 5 -v http://localhost:3000
+
+deployment:
+  production:
+    branch: master
+    commands:
+      - docker run -d -p 5000:5000 \
+        --name registry \
+        -e REGISTRY_STORAGE=s3 \
+        -e REGISTRY_STORAGE_S3_ACCESSKEY=$REGISTRY_STORAGE_S3_ACCESSKEY \
+        -e REGISTRY_STORAGE_S3_SECRETKEY=$REGISTRY_STORAGE_S3_SECRETKEY \
+        -e REGISTRY_STORAGE_S3_REGION=$REGISTRY_STORAGE_S3_REGION \
+        -e REGISTRY_STORAGE_S3_BUCKET=$REGISTRY_STORAGE_S3_BUCKET \
+        -e REGISTRY_STORAGE_S3_ROOTDIRECTORY=/  \
+        registry:2.0
+      - docker tag -f violetyk/rails-sample localhost:5000/violetyk/rails-sample
+      - docker tag -f violetyk/rails-sample localhost:5000/violetyk/rails-sample:$(git log -n 1 --format=%H)
+      - docker push localhost:5000/violetyk/rails-sample
+      - docker push localhost:5000/violetyk/rails-sample:$(git log -n 1 --format=%H)
+      # - docker login -e $DOCKER_EMAIL -u $DOCKER_USER -p $DOCKER_PASS
+      # - docker push violetyk/rails-sample
+  # staging:
+    # branch: master
+    # heroku:
+      # appname: foo-bar-123
+
+## Custom notifications
+# notify:
+  # webhooks:
+    # # A list of hashes representing hooks. Only the url field is supported.
+    # - url: https://someurl.com/hooks/circle
